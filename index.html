@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Trees Hate You</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      color: #fff;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    #unity-canvas {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      border: 0;
+      outline: none;
+      background: #000;
+      touch-action: none;
+    }
+
+    #loading-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      background: #111;
+      transition: opacity .35s ease;
+    }
+
+    #loading-screen.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #game-title {
+      margin-bottom: 22px;
+      font-size: clamp(18px, 3vw, 24px);
+      font-weight: 700;
+      letter-spacing: 4px;
+      text-align: center;
+    }
+
+    #progress-container {
+      width: min(340px, 75vw);
+      height: 6px;
+      background: #252525;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 15px;
+    }
+
+    #progress-bar {
+      width: 0%;
+      height: 100%;
+      background: #007bff;
+      transition: width .15s linear;
+    }
+
+    #loading-status {
+      width: min(340px, 75vw);
+      min-height: 18px;
+      color: #aaa;
+      font-size: 12px;
+      letter-spacing: 1px;
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+
+    #loading-percent {
+      margin-top: 9px;
+      color: #666;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #loading-error {
+      display: none;
+      width: min(500px, 85vw);
+      margin-top: 20px;
+      color: #ff6666;
+      font-size: 12px;
+      line-height: 1.6;
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="unity-canvas" tabindex="-1"></canvas>
+
+  <div id="loading-screen">
+    <div id="game-title">Trees Hate You</div>
+
+    <div id="progress-container">
+      <div id="progress-bar"></div>
+    </div>
+
+    <div id="loading-status">INITIALIZING...</div>
+    <div id="loading-percent">0%</div>
+    <div id="loading-error"></div>
+  </div>
+
+  <script>
+    (() => {
+      const canvas = document.querySelector("#unity-canvas");
+      const loadingScreen = document.querySelector("#loading-screen");
+      const progressBar = document.querySelector("#progress-bar");
+      const statusText = document.querySelector("#loading-status");
+      const percentText = document.querySelector("#loading-percent");
+      const errorText = document.querySelector("#loading-error");
+
+      const jsdelivrRepoBase = "https://cdn.jsdelivr.net/gh/AlexBoops/Trees-Hate-You@main";
+      const jsdelivrBuildUrl = `${jsdelivrRepoBase}/Build`;
+
+      function setLoading(percent, message) {
+        const value = Math.max(0, Math.min(100, percent));
+        progressBar.style.width = value + "%";
+        percentText.textContent = Math.round(value) + "%";
+        statusText.textContent = message;
+      }
+
+      function showError(error) {
+        console.error("[Unity] Failed to load:", error);
+        statusText.textContent = "LOADING FAILED";
+        errorText.style.display = "block";
+        errorText.textContent = (error && error.message ? error.message : String(error));
+      }
+
+      function resizeCanvas() {
+        canvas.style.width = window.innerWidth + "px";
+        canvas.style.height = window.innerHeight + "px";
+      }
+
+      window.addEventListener("resize", resizeCanvas);
+      resizeCanvas();
+
+      async function fetchChunkWithRetry(chunkUrl, retries = 6, delayMs = 5000) {
+        for (let attempt = 1; attempt <= retries; attempt++) {
+          try {
+            const res = await fetch(chunkUrl);
+            const contentType = res.headers.get("content-type") || "";
+
+            if (res.ok && !contentType.includes("text/html")) {
+              const buf = await res.arrayBuffer();
+              if (buf.byteLength > 0) return buf;
+            }
+            console.warn(`[jsDelivr Attempt ${attempt}/${retries}] HTTP ${res ? res.status : 'Error'} for ${chunkUrl}`);
+          } catch (err) {
+            console.warn(`[jsDelivr Attempt ${attempt}/${retries}] Network error for ${chunkUrl}`);
+          }
+
+          if (attempt < retries) {
+            setLoading(
+              parseFloat(progressBar.style.width) || 0,
+              `RETRYING IN 5s (ATTEMPT ${attempt}/${retries})...`
+            );
+            await new Promise(r => setTimeout(r, delayMs));
+          }
+        }
+        throw new Error(`Failed to download chunk ${chunkUrl} after ${retries} attempts.`);
+      }
+
+      // Reassemble unpadded 0-indexed parts (.part0, .part1, .part2...)
+      async function assembleSplitFile(baseName, totalParts, mimeType, startPct, endPct) {
+        const chunks = [];
+        let totalBytes = 0;
+
+        for (let i = 0; i < totalParts; i++) {
+          const chunkUrl = `${jsdelivrBuildUrl}/${baseName}.part${i}`;
+
+          const currentPct = startPct + (i / totalParts) * (endPct - startPct);
+          setLoading(currentPct, `DOWNLOADING ${baseName} (${i+1}/${totalParts})...`);
+
+          const buf = await fetchChunkWithRetry(chunkUrl);
+          chunks.push(buf);
+          totalBytes += buf.byteLength;
+        }
+
+        const combined = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          combined.set(new Uint8Array(chunk), offset);
+          offset += chunk.byteLength;
+        }
+
+        return URL.createObjectURL(new Blob([combined], { type: mimeType }));
+      }
+
+      async function startUnity() {
+        try {
+          setLoading(1, "INITIALIZING...");
+
+          // Stream .part0 through .part4 (5 parts) for data, and .part0 through .part3 (4 parts) for WASM
+          const dataBlobUrl = await assembleSplitFile("TreesHateYou_Web.data", 5, "application/octet-stream", 2, 45);
+          const wasmBlobUrl = await assembleSplitFile("TreesHateYou_Web.wasm", 4, "application/wasm", 46, 85);
+
+          setLoading(86, "LOADING ENGINE LOADER...");
+
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = `${jsdelivrBuildUrl}/TreesHateYou_Web.loader.js`;
+            script.crossOrigin = "anonymous";
+            script.onload = resolve;
+            script.onerror = () => reject(new Error(`Failed to load engine loader from ${jsdelivrBuildUrl}/TreesHateYou_Web.loader.js`));
+            document.body.appendChild(script);
+          });
+
+          const config = {
+            dataUrl: dataBlobUrl,
+            frameworkUrl: `${jsdelivrBuildUrl}/TreesHateYou_Web.framework.js`,
+            codeUrl: wasmBlobUrl,
+            streamingAssetsUrl: `${jsdelivrRepoBase}/StreamingAssets`,
+            companyName: "tykenn games",
+            productName: "Trees Hate You",
+            productVersion: "0.1.0",
+            matchWebGLToCanvasSize: true,
+            devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2)
+          };
+
+          const unityInstance = await createUnityInstance(
+            canvas,
+            config,
+            progress => {
+              const percent = 86 + progress * 14;
+              setLoading(
+                percent,
+                progress < 1
+                  ? "LAUNCHING ENGINE... " + Math.round(progress * 100) + "%"
+                  : "STARTING GAME..."
+              );
+            }
+          );
+
+          window.unityInstance = unityInstance;
+
+          setLoading(100, "READY");
+
+          setTimeout(() => {
+            loadingScreen.classList.add("hidden");
+            setTimeout(() => {
+              loadingScreen.style.display = "none";
+              canvas.focus();
+            }, 400);
+          }, 250);
+
+        } catch (error) {
+          showError(error);
+        }
+      }
+
+      startUnity();
+    })();
+  </script>
+</body>
+</html>
